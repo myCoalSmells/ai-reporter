@@ -155,6 +155,8 @@ def define_G(input_nc, output_nc, ngf, netG, norm='batch', use_dropout=False, in
         net = UnetGenerator(input_nc, output_nc, 7, ngf, norm_layer=norm_layer, use_dropout=use_dropout)
     elif netG == 'unet_256':
         net = UnetGenerator(input_nc, output_nc, 8, ngf, norm_layer=norm_layer, use_dropout=use_dropout)
+    elif netG == 'msunet_256':
+        net = MSUnetGenerator(input_nc, output_nc, 8, ngf, norm_layer=norm_layer, use_dropout=use_dropout)
     else:
         raise NotImplementedError('Generator model name [%s] is not recognized' % netG)
     return init_net(net, init_type, init_gain, gpu_ids)
@@ -437,7 +439,7 @@ class ResnetBlock(nn.Module):
 class UnetGenerator(nn.Module):
     """Create a Unet-based generator"""
 
-    def __init__(self, input_nc, output_nc, num_downs, ngf=64, norm_layer=nn.BatchNorm2d, use_dropout=False):
+    def __init__(self, input_nc, output_nc, num_downs, ngf=64, norm_layer=nn.BatchNorm2d, use_dropout=False, downconv_module=None):
         """Construct a Unet generator
         Parameters:
             input_nc (int)  -- the number of channels in input images
@@ -452,19 +454,45 @@ class UnetGenerator(nn.Module):
         """
         super(UnetGenerator, self).__init__()
         # construct unet structure
-        unet_block = UnetSkipConnectionBlock(ngf * 8, ngf * 8, input_nc=None, submodule=None, norm_layer=norm_layer, innermost=True)  # add the innermost layer
+        unet_block = UnetSkipConnectionBlock(ngf * 8, ngf * 8, input_nc=None, submodule=None, norm_layer=norm_layer, innermost=True, downconv_module=downconv_module)  # add the innermost layer
         for i in range(num_downs - 5):          # add intermediate layers with ngf * 8 filters
-            unet_block = UnetSkipConnectionBlock(ngf * 8, ngf * 8, input_nc=None, submodule=unet_block, norm_layer=norm_layer, use_dropout=use_dropout)
+            unet_block = UnetSkipConnectionBlock(ngf * 8, ngf * 8, input_nc=None, submodule=unet_block, norm_layer=norm_layer, use_dropout=use_dropout, downconv_module=downconv_module)
         # gradually reduce the number of filters from ngf * 8 to ngf
-        unet_block = UnetSkipConnectionBlock(ngf * 4, ngf * 8, input_nc=None, submodule=unet_block, norm_layer=norm_layer)
-        unet_block = UnetSkipConnectionBlock(ngf * 2, ngf * 4, input_nc=None, submodule=unet_block, norm_layer=norm_layer)
-        unet_block = UnetSkipConnectionBlock(ngf, ngf * 2, input_nc=None, submodule=unet_block, norm_layer=norm_layer)
-        self.model = UnetSkipConnectionBlock(output_nc, ngf, input_nc=input_nc, submodule=unet_block, outermost=True, norm_layer=norm_layer)  # add the outermost layer
+        unet_block = UnetSkipConnectionBlock(ngf * 4, ngf * 8, input_nc=None, submodule=unet_block, norm_layer=norm_layer, downconv_module=downconv_module)
+        unet_block = UnetSkipConnectionBlock(ngf * 2, ngf * 4, input_nc=None, submodule=unet_block, norm_layer=norm_layer, downconv_module=downconv_module)
+        unet_block = UnetSkipConnectionBlock(ngf, ngf * 2, input_nc=None, submodule=unet_block, norm_layer=norm_layer, downconv_module=downconv_module)
+        self.model = UnetSkipConnectionBlock(output_nc, ngf, input_nc=input_nc, submodule=unet_block, outermost=True, norm_layer=norm_layer, downconv_module=downconv_module)  # add the outermost layer
 
     def forward(self, input):
         """Standard forward"""
         return self.model(input)
 
+class MSUnetGenerator(UnetGenerator):
+    def __init__(self, input_nc, output_nc, num_downs, ngf=64, norm_layer=nn.BatchNorm2d, use_dropout=False):
+        downconv_module = MSU_downconv_module
+        super().__init__(input_nc, output_nc, num_downs, ngf, norm_layer, use_dropout, downconv_module)
+
+class MSU_downconv_module(nn.Module):
+    def __init__(self, input_nc, output_nc, kernel_size, stride, padding, bias):
+        super(MSU_downconv_module, self).__init__()
+        self.conv_full = nn.Conv2d(input_nc, output_nc // 2, kernel_size=kernel_size, stride=stride, padding=padding, bias=bias)
+        self.norm_full = nn.BatchNorm2d(output_nc // 2)
+        self.conv_half = nn.Conv2d(input_nc, output_nc // 2, kernel_size=kernel_size * 2, stride=stride, padding=padding + (kernel_size // 2), bias=bias)
+        self.norm_half = nn.BatchNorm2d(output_nc // 2)
+        self.conv_join = nn.Conv2d(output_nc, output_nc, kernel_size=1, stride=1, padding=0, bias=bias)
+
+        self.act = nn.LeakyReLU(0.2, True)
+
+    def forward(self, x):
+        x_full = self.conv_full(x)
+        x_full = self.norm_full(x_full)
+        x_full = self.act(x_full)
+        x_half = self.conv_half(x)
+        x_half = self.norm_half(x_half)
+        x_half = self.act(x_half)
+        x = torch.cat([x_full, x_half], dim=1)
+        x = self.conv_join(x)
+        return x
 
 class UnetSkipConnectionBlock(nn.Module):
     """Defines the Unet submodule with skip connection.
@@ -473,7 +501,7 @@ class UnetSkipConnectionBlock(nn.Module):
     """
 
     def __init__(self, outer_nc, inner_nc, input_nc=None,
-                 submodule=None, outermost=False, innermost=False, norm_layer=nn.BatchNorm2d, use_dropout=False):
+                 submodule=None, outermost=False, innermost=False, norm_layer=nn.BatchNorm2d, use_dropout=False, downconv_module=None):
         """Construct a Unet submodule with skip connections.
 
         Parameters:
@@ -494,8 +522,10 @@ class UnetSkipConnectionBlock(nn.Module):
             use_bias = norm_layer == nn.InstanceNorm2d
         if input_nc is None:
             input_nc = outer_nc
-        downconv = nn.Conv2d(input_nc, inner_nc, kernel_size=4,
-                             stride=2, padding=1, bias=use_bias)
+        if downconv_module is None:
+            downconv_module = nn.Conv2d
+        downconv = downconv_module(input_nc, inner_nc, kernel_size=4,
+                                   stride=2, padding=1, bias=use_bias)
         downrelu = nn.LeakyReLU(0.2, True)
         downnorm = norm_layer(inner_nc)
         uprelu = nn.ReLU(True)

@@ -9,11 +9,13 @@ import warnings
 from imageio import imwrite
 from tifffile import imwrite as tif_imwrite
 
-from BNNBench.backbones.unet import define_G
+from networks import define_G
+# from BNNBench.backbones.unet import define_G
 # from BNNBench.trainer.ensemble_trainer import test_epoch
 from BNNBench.data.paired_data import get_loader_with_dir
 
 from utils import get_constant_dim_mask
+from msu_net import MSU_Net
 
 def process_imgs(imgs):
     # transform from [-1, 1] to [0, 255]
@@ -29,6 +31,7 @@ def process_imgs(imgs):
 
 def parse_arguments():
     parser = argparse.ArgumentParser("Launch the ensemble evaluater")
+    parser.add_argument("--arch", type=str, choices=['unet', 'msunet'])
     parser.add_argument(
         "--src-dir",
         type=str,
@@ -41,11 +44,13 @@ def parse_arguments():
         required=True,
         help="Path to the testing target directory",
     )
-    parser.add_argument("--img-size", type=int, required=True, help="Size of images in pixels")
     parser.add_argument("--ckpt-file", type=str, required=True, help="Path to checkpoint file")
-    parser.add_argument("--batch-size", type=int, default=4, help="Training batch size")
+    parser.add_argument("--img-size", type=int, default=1024, help="Size of images in pixels")
+    parser.add_argument("--batch_size", type=int, default=1)
     parser.add_argument("--load_from_pl", action="store_true")
+
     parser.add_argument("--save_results_dir", type=str, default=None)
+    parser.add_argument("--n_saves", type=int, default=None)
     return parser.parse_args()
 
 def main():
@@ -59,14 +64,26 @@ def main():
     in_nc = src_batch.size(1)
     out_nc = tgt_batch.size(1)
 
-    model = define_G(in_nc, out_nc, 64, "unet_256", norm="batch", use_dropout=False)
-    state_dict = torch.load(args.ckpt_file)
-    if args.load_from_pl:
-        state_dict = state_dict["state_dict"]
-        prefix = "G."
-        state_dict = {k[len(prefix):]: v for k, v in state_dict.items() if k.startswith(prefix)}
-    model.load_state_dict(state_dict)
-    model.eval()
+    if args.arch == 'unet':
+        model = define_G(in_nc, out_nc, 64, "unet_256", norm="batch", use_dropout=False)
+        state_dict = torch.load(args.ckpt_file)
+        if args.load_from_pl:
+            state_dict = state_dict["state_dict"]
+            prefix = "G."
+            state_dict = {k[len(prefix):]: v for k, v in state_dict.items() if k.startswith(prefix)}
+        model.load_state_dict(state_dict)
+    elif args.arch == 'msunet':
+        # model = MSU_Net(in_nc, out_nc)
+        model = define_G(in_nc, out_nc, 64, "msunet_256", norm="batch", use_dropout=False)
+        state_dict = torch.load(args.ckpt_file)
+        if args.load_from_pl:
+            state_dict = state_dict["state_dict"]
+            prefix = "model."
+            state_dict = {k[len(prefix):]: v for k, v in state_dict.items() if k.startswith(prefix)}
+        model.load_state_dict(state_dict)
+    else:
+        raise NotImplementedError
+    model.eval().to(device)
 
     # test_epoch(test_loader, model)
 
@@ -109,7 +126,7 @@ def main():
         all_pred_imgs = process_imgs(all_pred_imgs)
         all_tgt_imgs = process_imgs(all_tgt_imgs)
 
-        for pred_img, tgt_img, fname in zip(all_pred_imgs, all_tgt_imgs, tqdm(fnames, leave=False)):
+        for ii, (pred_img, tgt_img, fname) in enumerate(zip(all_pred_imgs, all_tgt_imgs, tqdm(fnames, leave=False))):
             pred_path = os.path.join(args.save_results_dir, f"pred_{fname}")
             tgt_path = os.path.join(args.save_results_dir, f"tgt_{fname}")
 
@@ -119,6 +136,9 @@ def main():
             else:
                 imwrite(pred_path, pred_img)
                 imwrite(tgt_path, tgt_img)
+
+            if (args.n_saves is not None) and (ii + 1 >= args.n_saves):
+                break
         print(f"Results saved in {args.save_results_dir}")
 
 if __name__ == '__main__':

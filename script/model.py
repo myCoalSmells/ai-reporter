@@ -10,15 +10,128 @@ import torch.nn.functional as F
 import torchmetrics
 import pytorch_lightning as pl
 
-from BNNBench.backbones.unet import define_G
-from networks import define_D
+# from BNNBench.backbones.unet import define_G
+from networks import define_G, define_D
 from utils import get_constant_dim_mask
+from msu_net import MSU_Net
 
+class LitI2IPaired(pl.LightningModule):
+    @staticmethod
+    def add_model_specific_args(parent_parser):
+        parser = parent_parser.add_argument_group("LitI2IPaired")
+        parser.add_argument("--pretrained_unet_path", type=str)
+
+        # default train config pulled from pix2pix repo
+        # https://github.com/junyanz/pytorch-CycleGAN-and-pix2pix/blob/14422fb8486a4a2bd991082c1cda50c3a41a755e/options/base_options.py#L31
+        parser.add_argument("--in_nc", type=int, default=3)
+        parser.add_argument("--out_nc", type=int, default=3)
+        parser.add_argument("--ngf", type=int, default=64)
+        # https://github.com/junyanz/pytorch-CycleGAN-and-pix2pix/blob/f13aab8148bd5f15b9eb47b690496df8dadbab0c/options/train_options.py#L30
+        parser.add_argument("--lr", type=float, default=1e-3)
+        parser.add_argument("--b1", type=float, default=0.5)
+        parser.add_argument("--b2", type=float, default=0.999)
+        parser.add_argument("--weight_decay", type=float, default=1e-5)
+        parser.add_argument('--n_epochs_const', type=int, default=50, 
+                            help='number of epochs with the initial learning rate')
+        # parser.add_argument("--step_freq_D", type=int, default=1)
+        parser.add_argument("--no_dropout", action='store_true')
+
+        return parent_parser
+
+    def __init__(self, *args, **kwargs):
+        super().__init__()
+        self.save_hyperparameters()
+        self._init_models()
+        self._init_metrics()
+
+    def _init_models(self):
+        raise NotImplementedError
+
+    def _init_metrics(self):
+        self.l1_loss = nn.L1Loss()
+        self.pearson_val = []
+        self.pearson_tst = []
+        self.pearson_metric = torchmetrics.PearsonCorrCoef()
+
+    def training_step(self, batch):
+        raise NotImplementedError
+
+    def validation_step(self, batch):
+        raise NotImplementedError
+
+    def test_step(self, batch):
+        raise NotImplementedError
+
+    def on_validation_epoch_end(self, *args, **kwargs):
+        self.log('pearson_val', torch.tensor(self.pearson_val).mean(), sync_dist=True)
+        self.pearson_val = [] # reset
+
+    def on_test_epoch_end(self, *args, **kwargs):
+        #self.log('pearson_tst', np.mean(self.pearson_tst))
+        self.log('pearson_tst', torch.tensor(self.pearson_tst).mean(), sync_dist=True)
+        self.pearson_tst = [] # reset
+
+    def configure_optimizers(self):
+        opt = optim.AdamW(self.model.parameters(), lr=self.hparams.lr, 
+                          betas=(self.hparams.b1, self.hparams.b2),
+                          weight_decay=self.hparams.weight_decay)
+
+        # https://github.com/junyanz/pytorch-CycleGAN-and-pix2pix/blob/f13aab8148bd5f15b9eb47b690496df8dadbab0c/models/networks.py#L46
+        def lambda_rule(epoch):
+            n_epochs_decay = float(self.hparams.max_epochs - self.hparams.n_epochs_const + 1)
+            lr_l = 1.0 - max(0, epoch - self.hparams.n_epochs_const) / n_epochs_decay
+            return lr_l
+
+        sch = lr_scheduler.LambdaLR(opt, lr_lambda=lambda_rule)
+
+        return [opt], [sch]
+
+class LitMSUnet(LitI2IPaired):
+    def _init_models(self):
+        self.model = MSU_Net(self.hparams.in_nc, self.hparams.out_nc)
+        if (self.hparams.pretrained_unet_path != 'None') and \
+           (self.hparams.pretrained_unet_path is not None):
+            self.model.load_state_dict(torch.load(self.hparams.pretrained_unet_path))
+            print(f"Loading pretrained weight from {self.hparams.pretrained_unet_path}")
+
+    def training_step(self, batch):
+        src, tgt = batch
+        tgt_pred = self.model(src)
+        loss = self.l1_loss(tgt_pred, tgt)
+        return loss
+
+    def _eval_pearson(self, batch):
+        src, tgt = batch
+
+        mask = get_constant_dim_mask(tgt[0].detach().cpu().numpy())
+        mask = torch.from_numpy(mask).to(src.device)
+
+        with torch.no_grad():
+            tgt_pred = self.model(src)[:, mask, :, :]
+            tgt = tgt[:, mask, :, :]
+            p = self.pearson_metric(tgt_pred.flatten(), tgt.flatten())
+        return p
+
+    def validation_step(self, batch, batch_idx):
+        self.pearson_val.append(self._eval_pearson(batch))
+
+    def test_step(self, batch, batch_idx):
+        self.pearson_tst.append(self._eval_pearson(batch))
+
+class LitMSUnetV2(LitMSUnet):
+    def _init_models(self):
+        self.model = define_G(self.hparams.in_nc, self.hparams.out_nc, 
+                              self.hparams.ngf, "msunet_256", norm="batch", 
+                              use_dropout=not self.hparams.no_dropout)
+        if (self.hparams.pretrained_unet_path != 'None') and \
+           (self.hparams.pretrained_unet_path is not None):
+            self.model.load_state_dict(torch.load(self.hparams.pretrained_unet_path))
+            print(f"Loading pretrained weight from {self.hparams.pretrained_unet_path}")
 
 class LitI2IGAN(pl.LightningModule):
     @staticmethod
     def add_model_specific_args(parent_parser):
-        parser = parent_parser.add_argument_group("LitUnetGAN")
+        parser = parent_parser.add_argument_group("LitI2IGAN")
         parser.add_argument("--pretrained_unet_path", type=str)
 
         # default train config pulled from pix2pix repo
@@ -159,6 +272,17 @@ class LitUnetGAN(LitI2IGAN):
 
     def test_step(self, batch, batch_idx):
         self.pearson_tst.append(self._eval_pearson(batch))
+
+class LitMSUnetGAN(LitUnetGAN):
+    def _init_models(self):
+        self.G = MSU_Net(self.hparams.in_nc, self.hparams.out_nc)
+        if (self.hparams.pretrained_unet_path != 'None') and \
+           (self.hparams.pretrained_unet_path is not None):
+            self.G.load_state_dict(torch.load(self.hparams.pretrained_unet_path))
+            print(f"Loading pretrained weight from {self.hparams.pretrained_unet_path}")
+
+        self.D = define_D(self.hparams.out_nc, self.hparams.ndf, 'basic',
+                          n_layers_D=3, norm="batch")
 
 class LitAddaUnet(LitI2IGAN):
 
