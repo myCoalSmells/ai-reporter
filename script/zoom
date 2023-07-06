@@ -1,0 +1,49 @@
+from PIL import Image
+import os
+
+def zoom_in(image_path, zoom_factor, output_path):
+    # Open the image file
+    image = Image.open(image_path)
+
+    # Calculate the box size based on the zoom factor
+    box_width = int(image.width / zoom_factor)
+    box_height = int(image.height / zoom_factor)
+
+    # Calculate the box coordinates, keeping it centered
+    box = (int((image.width - box_width) / 2),
+           int((image.height - box_height) / 2),
+           int((image.width + box_width) / 2),
+           int((image.height + box_height) / 2))
+
+    # Crop the image to the specified box
+    cropped_image = image.crop(box)
+
+    # Resize the cropped image to the original image size
+    resized_image = cropped_image.resize(image.size, Image.LANCZOS)
+
+    # Save the modified image as a new file
+    resized_image.save(output_path)
+
+def process_images(input_folder, output_folder, zoom_factor):
+    # Create the output folder if it does not exist
+    os.makedirs(output_folder, exist_ok=True)
+
+    # List all files in the input folder
+    files = os.listdir(input_folder)
+
+    # Filter only image files
+    image_files = [file for file in files if file.lower().endswith(('.tif', '.png', '.jpg', '.jpeg', '.gif', '.bmp'))]
+
+    # Process each image file
+    for image_file in image_files:
+        image_path = os.path.join(input_folder, image_file)
+        output_path = os.path.join(output_folder, 'zoomed_' + image_file) # Remove everything before image_file for same name
+        print(f"Processing: {image_path}")
+        zoom_in(image_path, zoom_factor, output_path)
+
+# Example usage:
+input_folder = "/Users/mycoalsmells/Desktop/research/test"
+output_folder = "/Users/mycoalsmells/Desktop/research/test/zoom_5"
+zoom_factor = 5  # Increase the zoom factor to zoom in more
+
+process_images(input_folder, output_folder, zoom_factor)

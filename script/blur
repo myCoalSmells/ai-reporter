@@ -1,0 +1,40 @@
+import os
+from PIL import Image, ImageFilter
+
+def adjust_blur(image_path, blur_amount, output_path):
+    # Open the image file
+    image = Image.open(image_path)
+
+    # Adjust the blur of the image
+    blurred_image = image.filter(ImageFilter.GaussianBlur(radius=blur_amount))
+
+    # Save the modified image as a new file
+    blurred_image.save(output_path)
+    print(f"Saved: {output_path}")
+
+def process_images(input_folder, output_folder, blur_amount):
+    # List all files in the input folder
+    files = os.listdir(input_folder)
+
+    # Filter only image files
+    image_files = [file for file in files if file.lower().endswith(('.tif', '.png', '.jpg', '.jpeg', '.gif', '.bmp'))]
+
+    # Process each image file
+    for image_file in image_files:
+        image_path = os.path.join(input_folder, image_file)
+        output_path = os.path.join(output_folder, f"blurred_{blur_amount}_{image_file}") # Remove everything before image_file for same name
+        print(f"Processing: {image_path}")
+        adjust_blur(image_path, blur_amount, output_path)
+
+    print("Processing complete!")
+
+# Example usage:
+input_folder = "/Users/mycoalsmells/Desktop/research/test"
+output_folder = "/Users/mycoalsmells/Desktop/research/test/blur_tests/blur_1"
+blur_amount = 1
+
+# Create the output folder if it does not exist
+if not os.path.exists(output_folder):
+    os.makedirs(output_folder)
+
+process_images(input_folder, output_folder, blur_amount)

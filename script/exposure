@@ -1,0 +1,46 @@
+import os
+from PIL import Image
+
+def adjust_exposure(image_path, exposure, output_path):
+    # Open the image file
+    image = Image.open(image_path)
+
+    # Create a new image with the same mode and size as the original
+    new_image = Image.new(image.mode, image.size)
+
+    # Adjust the exposure of each pixel in the new image
+    factor = (exposure + 100) / 100.0
+    for x in range(image.width):
+        for y in range(image.height):
+            pixel = tuple(int(value * factor) for value in image.getpixel((x, y)))
+            new_image.putpixel((x, y), pixel)
+
+    # Save the modified image as a new file
+    new_image.save(output_path)
+
+def process_images(input_folder, output_folder, exposure):
+    # List all files in the input folder
+    files = os.listdir(input_folder)
+
+    # Filter only image files
+    image_files = [file for file in files if file.lower().endswith(('.tif', '.png', '.jpg', '.jpeg', '.gif', '.bmp'))]
+
+    # Process each image file
+    for image_file in image_files:
+        image_path = os.path.join(input_folder, image_file)
+        output_path = os.path.join(output_folder, f"exposure_adjusted_{exposure}_{image_file}") # Remove everything before image_file for same name
+        print(f"Processing: {image_path}")
+        adjust_exposure(image_path, exposure, output_path)
+
+    print("Processing complete!")
+
+# Example usage:
+input_folder = "/Users/mycoalsmells/Desktop/research/test"
+output_folder = "/Users/mycoalsmells/Desktop/research/test/overexpose_175"
+exposure = 175
+
+# Create the output folder if it does not exist
+if not os.path.exists(output_folder):
+    os.makedirs(output_folder)
+
+process_images(input_folder, output_folder, exposure)
